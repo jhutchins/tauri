@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #![allow(dead_code)]
+#![allow(missing_docs)]
 
 use tauri_runtime::{
   menu::{Menu, MenuUpdate},
@@ -551,7 +552,7 @@ impl<T: UserEvent> EventLoopProxy<T> for EventProxy {
 
 #[derive(Debug)]
 pub struct MockRuntime {
-  pub context: RuntimeContext,
+  pub(crate) context: RuntimeContext,
   #[cfg(all(desktop, feature = "global-shortcut"))]
   global_shortcut_manager: MockGlobalShortcutManager,
   #[cfg(feature = "clipboard")]
