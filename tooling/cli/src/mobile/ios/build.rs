@@ -8,7 +8,7 @@ use crate::{
   mobile::{write_options, CliOptions},
   Result,
 };
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 use cargo_mobile::{
   apple::{config::Config as AppleConfig, target::Target},
@@ -29,14 +29,14 @@ pub struct Options {
   #[clap(
     short,
     long = "target",
-    multiple_occurrences(true),
-    multiple_values(true),
+    action = ArgAction::Append,
+    num_args(0..),
     default_value = Target::DEFAULT_KEY,
     value_parser(clap::builder::PossibleValuesParser::new(Target::name_list()))
   )]
   pub targets: Vec<String>,
   /// List of cargo features to activate
-  #[clap(short, long, multiple_occurrences(true), multiple_values(true))]
+  #[clap(short, long, action = ArgAction::Append, num_args(0..))]
   pub features: Option<Vec<String>>,
   /// JSON string or path to JSON file to merge with tauri.conf.json
   #[clap(short, long)]
@@ -134,7 +134,7 @@ fn run_build(
     options.targets.iter(),
     &detect_target_ok,
     env,
-    |target: &Target| {
+    |target: &Target| -> Result<()> {
       let mut app_version = config.bundle_version().clone();
       if let Some(build_number) = options.build_number {
         app_version.push_extra(build_number);
@@ -152,11 +152,10 @@ fn run_build(
         out_files.push(path);
       }
 
-      anyhow::Result::Ok(())
+      Ok(())
     },
   )
-  .map_err(|e: TargetInvalid| anyhow::anyhow!(e.to_string()))?
-  .map_err(|e: anyhow::Error| e)?;
+  .map_err(|e: TargetInvalid| anyhow::anyhow!(e.to_string()))??;
 
   log_finished(out_files, "IPA");
 
