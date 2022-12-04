@@ -3,7 +3,7 @@ use super::{
   MobileTarget,
 };
 use crate::{
-  helpers::{config::get as get_tauri_config, flock},
+  helpers::flock,
   interface::{AppSettings, Interface, MobileOptions, Options as InterfaceOptions},
   mobile::{write_options, CliOptions, DevChild, DevProcess},
   Result,
@@ -16,7 +16,7 @@ use cargo_mobile::{
     env::Env,
   },
   config::app::App,
-  opts::{NoiseLevel, Profile},
+  opts::{FilterLevel, NoiseLevel, Profile},
 };
 
 use std::env::set_var;
@@ -92,14 +92,7 @@ fn run_dev(
   noise_level: NoiseLevel,
 ) -> Result<()> {
   let mut dev_options = options.clone().into();
-  let mut interface = crate::dev::setup(&mut dev_options)?;
-
-  let bundle_identifier = {
-    let tauri_config = get_tauri_config(None)?;
-    let tauri_config_guard = tauri_config.lock().unwrap();
-    let tauri_config_ = tauri_config_guard.as_ref().unwrap();
-    tauri_config_.tauri.bundle.identifier.clone()
-  };
+  let mut interface = crate::dev::setup(&mut dev_options, true)?;
 
   let app_settings = interface.app_settings();
   let bin_path = app_settings.app_binary_path(&InterfaceOptions {
@@ -125,13 +118,14 @@ fn run_dev(
       no_watch: options.no_watch,
     },
     |options| {
+      let mut env = env.clone();
       let cli_options = CliOptions {
         features: options.features.clone(),
         args: options.args.clone(),
         noise_level,
         vars: Default::default(),
       };
-      write_options(cli_options, &bundle_identifier, MobileTarget::Android)?;
+      let _handle = write_options(cli_options, &mut env.base)?;
 
       if open {
         open_and_wait(config, &env)
@@ -154,7 +148,10 @@ fn run_dev(
             log::error!("{}", e);
             open_and_wait(config, &env)
           }
-          Err(e) => Err(e.into()),
+          Err(e) => {
+            crate::dev::kill_before_dev_process();
+            Err(e.into())
+          }
         }
       }
     },
@@ -192,7 +189,11 @@ fn run(
       env,
       noise_level,
       profile,
-      None,
+      Some(match noise_level {
+        NoiseLevel::Polite => FilterLevel::Info,
+        NoiseLevel::LoudAndProud => FilterLevel::Debug,
+        NoiseLevel::FranklyQuitePedantic => FilterLevel::Verbose,
+      }),
       build_app_bundle,
       false,
       ".MainActivity".into(),

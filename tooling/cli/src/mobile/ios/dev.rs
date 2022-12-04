@@ -1,8 +1,9 @@
 use super::{
   device_prompt, ensure_init, env, init_dot_cargo, open_and_wait, with_config, MobileTarget,
+  APPLE_DEVELOPMENT_TEAM_ENV_VAR_NAME,
 };
 use crate::{
-  helpers::{config::get as get_tauri_config, flock},
+  helpers::flock,
   interface::{AppSettings, Interface, MobileOptions, Options as InterfaceOptions},
   mobile::{write_options, CliOptions, DevChild, DevProcess},
   Result,
@@ -10,11 +11,14 @@ use crate::{
 use clap::{ArgAction, Parser};
 
 use cargo_mobile::{
-  apple::config::Config as AppleConfig,
+  apple::{config::Config as AppleConfig, teams::find_development_teams},
   config::app::App,
   env::Env,
   opts::{NoiseLevel, Profile},
 };
+use dialoguer::{theme::ColorfulTheme, Select};
+
+use std::env::{set_var, var_os};
 
 #[derive(Debug, Clone, Parser)]
 #[clap(about = "iOS dev")]
@@ -57,6 +61,36 @@ impl From<Options> for crate::dev::Options {
 }
 
 pub fn command(options: Options, noise_level: NoiseLevel) -> Result<()> {
+  if var_os(APPLE_DEVELOPMENT_TEAM_ENV_VAR_NAME).is_none() {
+    if let Ok(teams) = find_development_teams() {
+      let index = match teams.len() {
+        0 => None,
+        1 => Some(0),
+        _ => {
+          let index = Select::with_theme(&ColorfulTheme::default())
+            .items(
+              &teams
+                .iter()
+                .map(|t| format!("{} (ID: {})", t.name, t.id))
+                .collect::<Vec<String>>(),
+            )
+            .default(0)
+            .interact()?;
+          Some(index)
+        }
+      };
+      if let Some(index) = index {
+        let team = teams.get(index).unwrap();
+        log::info!(
+            "Using development team `{}`. To make this permanent, set the `{}` environment variable to `{}`",
+            team.name,
+            APPLE_DEVELOPMENT_TEAM_ENV_VAR_NAME,
+            team.id
+          );
+        set_var(APPLE_DEVELOPMENT_TEAM_ENV_VAR_NAME, &team.id);
+      }
+    }
+  }
   with_config(
     Some(Default::default()),
     |app, config, _metadata, _cli_options| {
@@ -73,14 +107,7 @@ fn run_dev(
   noise_level: NoiseLevel,
 ) -> Result<()> {
   let mut dev_options = options.clone().into();
-  let mut interface = crate::dev::setup(&mut dev_options)?;
-
-  let bundle_identifier = {
-    let tauri_config = get_tauri_config(None)?;
-    let tauri_config_guard = tauri_config.lock().unwrap();
-    let tauri_config_ = tauri_config_guard.as_ref().unwrap();
-    tauri_config_.tauri.bundle.identifier.clone()
-  };
+  let mut interface = crate::dev::setup(&mut dev_options, true)?;
 
   let app_settings = interface.app_settings();
   let bin_path = app_settings.app_binary_path(&InterfaceOptions {
@@ -106,13 +133,14 @@ fn run_dev(
       no_watch: options.no_watch,
     },
     |options| {
+      let mut env = env.clone();
       let cli_options = CliOptions {
         features: options.features.clone(),
         args: options.args.clone(),
         noise_level,
         vars: Default::default(),
       };
-      write_options(cli_options, &bundle_identifier, MobileTarget::Ios)?;
+      let _handle = write_options(cli_options, &mut env)?;
 
       if open {
         open_and_wait(config, &env)
@@ -128,7 +156,10 @@ fn run_dev(
             log::error!("{}", e);
             open_and_wait(config, &env)
           }
-          Err(e) => Err(e.into()),
+          Err(e) => {
+            crate::dev::kill_before_dev_process();
+            Err(e.into())
+          }
         }
       }
     },

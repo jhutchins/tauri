@@ -909,20 +909,23 @@ impl<R: Runtime> WindowManager<R> {
 
       #[cfg(dev)]
       let mut response = {
+        use attohttpc::StatusCode;
         let mut url = url.clone();
         url.set_path(&path);
-        match attohttpc::get(url.as_str())
-          .danger_accept_invalid_certs(true)
-          .send()
-        {
+        let mut proxy_builder = attohttpc::get(url.as_str()).danger_accept_invalid_certs(true);
+        for (name, value) in request.headers() {
+          proxy_builder = proxy_builder.header(name, value);
+        }
+        match proxy_builder.send() {
           Ok(r) => {
             for (name, value) in r.headers() {
-              if name == "Content-Type" {
-                builder = builder.mimetype(value.to_str().unwrap());
-              }
               builder = builder.header(name, value);
             }
-            builder.status(r.status()).body(r.bytes()?)?
+            let mut status = r.status();
+            if status == StatusCode::NOT_MODIFIED {
+              status = StatusCode::OK;
+            }
+            builder.status(status).body(r.bytes()?)?
           }
           Err(e) => {
             debug_eprintln!("Failed to request {}: {}", url.as_str(), e);

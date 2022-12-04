@@ -20,6 +20,7 @@ use shared_child::SharedChild;
 
 use std::{
   env::set_current_dir,
+  net::{IpAddr, Ipv4Addr, SocketAddr},
   process::{exit, Command, ExitStatus, Stdio},
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -74,7 +75,7 @@ pub fn command(options: Options) -> Result<()> {
 }
 
 fn command_internal(mut options: Options) -> Result<()> {
-  let mut interface = setup(&mut options)?;
+  let mut interface = setup(&mut options, false)?;
   let exit_on_panic = options.exit_on_panic;
   let no_watch = options.no_watch;
   interface.dev(options.into(), move |status, reason| {
@@ -82,7 +83,12 @@ fn command_internal(mut options: Options) -> Result<()> {
   })
 }
 
-pub fn setup(options: &mut Options) -> Result<AppInterface> {
+fn local_ip_address() -> &'static IpAddr {
+  static LOCAL_IP: OnceCell<IpAddr> = OnceCell::new();
+  LOCAL_IP.get_or_init(|| local_ip_address::local_ip().expect("failed to resolve local IP address"))
+}
+
+pub fn setup(options: &mut Options, mobile: bool) -> Result<AppInterface> {
   let tauri_path = tauri_dir();
   options.config = if let Some(config) = &options.config {
     Some(if config.starts_with('{') {
@@ -103,6 +109,39 @@ pub fn setup(options: &mut Options) -> Result<AppInterface> {
     options.target.clone(),
   )?;
 
+  let mut dev_path = config
+    .lock()
+    .unwrap()
+    .as_ref()
+    .unwrap()
+    .build
+    .dev_path
+    .clone();
+
+  if mobile {
+    if let AppUrl::Url(WindowUrl::External(url)) = &mut dev_path {
+      let localhost = match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost",
+        Some(url::Host::Ipv4(i)) => {
+          i == std::net::Ipv4Addr::LOCALHOST || i == std::net::Ipv4Addr::UNSPECIFIED
+        }
+        _ => false,
+      };
+      if localhost {
+        let ip = local_ip_address();
+        url.set_host(Some(&ip.to_string())).unwrap();
+        if let Some(c) = &options.config {
+          let mut c: tauri_utils::config::Config = serde_json::from_str(c)?;
+          c.build.dev_path = dev_path.clone();
+          options.config = Some(serde_json::to_string(&c).unwrap());
+        } else {
+          options.config = Some(format!(r#"{{ "build": {{ "devPath": "{}" }} }}"#, url))
+        }
+        reload_config(options.config.as_deref())?;
+      }
+    }
+  }
+
   if let Some(before_dev) = config
     .lock()
     .unwrap()
@@ -120,7 +159,25 @@ pub fn setup(options: &mut Options) -> Result<AppInterface> {
       }
     };
     let cwd = script_cwd.unwrap_or_else(|| app_dir().clone());
-    if let Some(before_dev) = script {
+    if let Some(mut before_dev) = script {
+      if before_dev.contains("$HOST") {
+        if mobile {
+          let local_ip_address = local_ip_address().to_string();
+          before_dev = before_dev.replace("$HOST", &local_ip_address);
+          if let AppUrl::Url(WindowUrl::External(url)) = &mut dev_path {
+            url.set_host(Some(&local_ip_address))?;
+          }
+        } else {
+          before_dev = before_dev.replace(
+            "$HOST",
+            if let AppUrl::Url(WindowUrl::External(url)) = &dev_path {
+              url.host_str().unwrap_or("0.0.0.0")
+            } else {
+              "0.0.0.0"
+            },
+          );
+        }
+      }
       info!(action = "Running"; "BeforeDevCommand (`{}`)", before_dev);
       let mut env = command_env(true);
       env.extend(interface.env());
@@ -219,20 +276,20 @@ pub fn setup(options: &mut Options) -> Result<AppInterface> {
     cargo_features.extend(features.clone());
   }
 
-  let mut dev_path = config
-    .lock()
-    .unwrap()
-    .as_ref()
-    .unwrap()
-    .build
-    .dev_path
-    .clone();
   if let AppUrl::Url(WindowUrl::App(path)) = &dev_path {
-    use crate::helpers::web_dev_server::{start_dev_server, SERVER_URL};
+    use crate::helpers::web_dev_server::start_dev_server;
     if path.exists() {
+      let ip = if mobile {
+        *local_ip_address()
+      } else {
+        Ipv4Addr::new(127, 0, 0, 1).into()
+      };
+      let port = 1430;
+      let server_address = SocketAddr::new(ip, port);
       let path = path.canonicalize()?;
-      start_dev_server(path);
-      dev_path = AppUrl::Url(WindowUrl::External(SERVER_URL.parse().unwrap()));
+      start_dev_server(server_address, path);
+      let server_url = format!("http://{}", server_address);
+      dev_path = AppUrl::Url(WindowUrl::External(server_url.parse().unwrap()));
 
       // TODO: in v2, use an env var to pass the url to the app context
       // or better separate the config passed from the cli internally and
@@ -245,7 +302,7 @@ pub fn setup(options: &mut Options) -> Result<AppInterface> {
       } else {
         options.config = Some(format!(
           r#"{{ "build": {{ "devPath": "{}" }} }}"#,
-          SERVER_URL
+          server_url
         ))
       }
     }
@@ -357,7 +414,7 @@ fn check_for_updates() -> Result<()> {
   Ok(())
 }
 
-fn kill_before_dev_process() {
+pub fn kill_before_dev_process() {
   if let Some(child) = BEFORE_DEV.get() {
     let child = child.lock().unwrap();
     KILL_BEFORE_DEV_FLAG
