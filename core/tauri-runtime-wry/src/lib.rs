@@ -79,6 +79,7 @@ pub use wry::application::platform::macos::{
 };
 
 use std::{
+  borrow::Cow,
   cell::RefCell,
   collections::{
     hash_map::Entry::{Occupied, Vacant},
@@ -284,7 +285,7 @@ impl From<&WryRequest<Vec<u8>>> for HttpRequestWrapper {
 }
 
 // response
-struct HttpResponseWrapper(WryResponse<Vec<u8>>);
+struct HttpResponseWrapper(WryResponse<Cow<'static, [u8]>>);
 impl From<HttpResponse> for HttpResponseWrapper {
   fn from(response: HttpResponse) -> Self {
     let (parts, body) = response.into_parts();
@@ -968,10 +969,10 @@ fn decode_path(path: PathBuf) -> PathBuf {
 impl From<FileDropEventWrapper> for FileDropEvent {
   fn from(event: FileDropEventWrapper) -> Self {
     match event.0 {
-      WryFileDropEvent::Hovered(paths) => {
+      WryFileDropEvent::Hovered { paths, position: _ } => {
         FileDropEvent::Hovered(paths.into_iter().map(decode_path).collect())
       }
-      WryFileDropEvent::Dropped(paths) => {
+      WryFileDropEvent::Dropped { paths, position: _ } => {
         FileDropEvent::Dropped(paths.into_iter().map(decode_path).collect())
       }
       // default to cancelled

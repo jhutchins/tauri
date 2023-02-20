@@ -1,5 +1,32 @@
 # Changelog
 
+## \[0.13.0-alpha.1]
+
+- Update gtk to 0.16.
+  - [7eb9aa75](https://www.github.com/tauri-apps/tauri/commit/7eb9aa75cfd6a3176d3f566fdda02d88aa529b0f) Update gtk to 0.16 ([#6155](https://www.github.com/tauri-apps/tauri/pull/6155)) on 2023-01-30
+- Bump the MSRV to 1.64.
+  - [7eb9aa75](https://www.github.com/tauri-apps/tauri/commit/7eb9aa75cfd6a3176d3f566fdda02d88aa529b0f) Update gtk to 0.16 ([#6155](https://www.github.com/tauri-apps/tauri/pull/6155)) on 2023-01-30
+- Update wry to 0.26.
+  - [f0a1d9cd](https://www.github.com/tauri-apps/tauri/commit/f0a1d9cdbcfb645ce1c5f1cdd597f764991772cd) chore: update rfd and wry versions ([#6174](https://www.github.com/tauri-apps/tauri/pull/6174)) on 2023-02-03
+
+## \[0.13.0-alpha.0]
+
+- Support `with_webview` for Android platform alowing execution of JNI code in context.
+  - [8ea87e9c](https://www.github.com/tauri-apps/tauri/commit/8ea87e9c9ca8ba4c7017c8281f78aacd08f45785) feat(android): with_webview access for jni execution ([#5148](https://www.github.com/tauri-apps/tauri/pull/5148)) on 2022-09-08
+
+## \[0.12.2]
+
+- Fix compatibility with older Linux distributions.
+  - [b490308c](https://www.github.com/tauri-apps/tauri/commit/b490308c8897b893292951754607c2253abbc6e1) fix(core): compilation error on older Linux versions, fixes [#5684](https://www.github.com/tauri-apps/tauri/pull/5684) ([#5697](https://www.github.com/tauri-apps/tauri/pull/5697)) on 2022-11-28
+- Update wry to 0.23.
+  - [fdcd7733](https://www.github.com/tauri-apps/tauri/commit/fdcd77338c1a3a7ef8a8ea1907351c5c350ea7ba) chore(deps): update wry to 0.23 on 2022-12-08
+
+## \[0.12.1]
+
+- Fix `allowlist > app > show/hide` always disabled when `allowlist > app > all: false`.
+  - Bumped due to a bump in tauri-utils.
+  - [bb251087](https://www.github.com/tauri-apps/tauri/commit/bb2510876d0bdff736d36bf3a465cdbe4ad2b90c) fix(core): extend allowlist with `app`'s allowlist, closes [#5650](https://www.github.com/tauri-apps/tauri/pull/5650) ([#5652](https://www.github.com/tauri-apps/tauri/pull/5652)) on 2022-11-18
+
 ## \[0.12.0]
 
 - Add `accept_first_mouse` option for macOS windows.

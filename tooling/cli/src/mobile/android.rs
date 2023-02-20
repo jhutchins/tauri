@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-use cargo_mobile::{
+use clap::{Parser, Subcommand};
+use std::{
+  env::set_var,
+  thread::{sleep, spawn},
+  time::Duration,
+};
+use sublime_fuzzy::best_match;
+use tauri_mobile::{
   android::{
     adb,
     config::{Config as AndroidConfig, Metadata as AndroidMetadata, Raw as RawAndroidConfig},
@@ -12,22 +19,16 @@ use cargo_mobile::{
     target::Target,
   },
   config::app::App,
-  opts::NoiseLevel,
+  opts::{FilterLevel, NoiseLevel},
   os,
   util::prompt,
 };
-use clap::{Parser, Subcommand};
-use std::{
-  env::set_var,
-  thread::{sleep, spawn},
-  time::Duration,
-};
-use sublime_fuzzy::best_match;
 
 use super::{
   ensure_init, get_app,
   init::{command as init_command, init_dot_cargo},
-  log_finished, read_options, CliOptions, Target as MobileTarget, MIN_DEVICE_MATCH_SCORE,
+  log_finished, read_options, setup_dev_config, CliOptions, Target as MobileTarget,
+  MIN_DEVICE_MATCH_SCORE,
 };
 use crate::{
   helpers::config::{get as get_tauri_config, Config as TauriConfig},
@@ -95,7 +96,18 @@ pub fn get_config(
 
   let raw = RawAndroidConfig {
     features: android_options.features.clone(),
-    logcat_filter_specs: vec!["RustStdoutStderr".into(), "*:E".into()],
+    logcat_filter_specs: vec![
+      "RustStdoutStderr".into(),
+      format!(
+        "*:{}",
+        match cli_options.noise_level {
+          NoiseLevel::Polite => FilterLevel::Info,
+          NoiseLevel::LoudAndProud => FilterLevel::Debug,
+          NoiseLevel::FranklyQuitePedantic => FilterLevel::Verbose,
+        }
+        .logcat()
+      ),
+    ],
     ..Default::default()
   };
   let config = AndroidConfig::from_raw(app.clone(), Some(raw)).unwrap();
@@ -107,8 +119,11 @@ pub fn get_config(
     ..Default::default()
   };
 
-  set_var("WRY_ANDROID_REVERSED_DOMAIN", app.reverse_domain());
-  set_var("WRY_ANDROID_APP_NAME_SNAKE_CASE", app.name());
+  set_var(
+    "WRY_ANDROID_PACKAGE",
+    format!("{}.{}", app.reverse_domain(), app.name_snake()),
+  );
+  set_var("WRY_ANDROID_LIBRARY", app.lib_name());
   set_var(
     "WRY_ANDROID_KOTLIN_FILES_OUT_DIR",
     config
@@ -117,7 +132,7 @@ pub fn get_config(
       .join(format!(
         "java/{}/{}",
         app.reverse_domain().replace('.', "/"),
-        app.name()
+        app.name_snake()
       ))
       .join("generated"),
   );
@@ -142,7 +157,7 @@ pub fn with_config<T>(
 
 fn env() -> Result<Env> {
   let env = super::env()?;
-  cargo_mobile::android::env::Env::from_env(env).map_err(Into::into)
+  tauri_mobile::android::env::Env::from_env(env).map_err(Into::into)
 }
 
 fn delete_codegen_vars() {
@@ -229,11 +244,6 @@ fn emulator_prompt(env: &'_ Env, target: Option<&str>) -> Result<emulator::Emula
     } else {
       emulator_list.into_iter().next().unwrap()
     };
-
-    let handle = emulator.start(env)?;
-    spawn(move || {
-      let _ = handle.wait();
-    });
 
     Ok(emulator)
   } else {

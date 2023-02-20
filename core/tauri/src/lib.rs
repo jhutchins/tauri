@@ -14,6 +14,7 @@
 //! - **test**: Enables the [`test`] module exposing unit test helpers.
 //! - **dox**: Internal feature to generate Rust documentation without linking on Linux.
 //! - **objc-exception**: Wrap each msg_send! in a @try/@catch and panics if an exception is caught, preventing Objective-C from unwinding into Rust.
+//! - **linux-protocol-headers**: Enables headers support for custom protocol requests on Linux. Requires webkit2gtk v2.36 or above.
 //! - **isolation**: Enables the isolation pattern. Enabled by default if the `tauri > pattern > use` config option is set to `isolation` on the `tauri.conf.json` file.
 //! - **custom-protocol**: Feature managed by the Tauri CLI. When enabled, Tauri assumes a production environment instead of a development one.
 //! - **updater**: Enables the application auto updater. Enabled by default if the `updater` config is defined on the `tauri.conf.json` file.
@@ -278,20 +279,41 @@ pub use self::runtime::ClipboardManager;
 #[cfg_attr(doc_cfg, doc(cfg(feature = "global-shortcut")))]
 pub use self::runtime::GlobalShortcutManager;
 
-#[cfg(target_os = "android")]
-#[doc(hidden)]
-pub fn init_logging(tag: &str) {
-  android_logger::init_once(
-    android_logger::Config::default()
-      .with_min_level(log::Level::Trace)
-      .with_tag(tag),
-  );
-}
-
 #[cfg(target_os = "ios")]
 #[doc(hidden)]
-pub fn init_logging(_tag: &str) {
-  env_logger::init();
+pub fn log_stdout() {
+  use std::{
+    ffi::CString,
+    fs::File,
+    io::{BufRead, BufReader},
+    os::unix::prelude::*,
+    thread,
+  };
+
+  let mut logpipe: [RawFd; 2] = Default::default();
+  unsafe {
+    libc::pipe(logpipe.as_mut_ptr());
+    libc::dup2(logpipe[1], libc::STDOUT_FILENO);
+    libc::dup2(logpipe[1], libc::STDERR_FILENO);
+  }
+  thread::spawn(move || unsafe {
+    let file = File::from_raw_fd(logpipe[0]);
+    let mut reader = BufReader::new(file);
+    let mut buffer = String::new();
+    loop {
+      buffer.clear();
+      if let Ok(len) = reader.read_line(&mut buffer) {
+        if len == 0 {
+          break;
+        } else if let Ok(msg) = CString::new(buffer.clone())
+          .map_err(|_| ())
+          .and_then(|c| c.into_string().map_err(|_| ()))
+        {
+          log::info!("{}", msg);
+        }
+      }
+    }
+  });
 }
 
 /// Updater events.
@@ -470,8 +492,7 @@ impl TryFrom<Icon> for runtime::Icon {
           })
         }
         _ => panic!(
-          "image `{}` extension not supported; please file a Tauri feature request. `png` or `ico` icons are supported with the `icon-png` and `icon-ico` feature flags",
-          extension
+          "image `{extension}` extension not supported; please file a Tauri feature request. `png` or `ico` icons are supported with the `icon-png` and `icon-ico` feature flags"
         ),
       }
       }
@@ -875,8 +896,8 @@ mod tests {
     let lib_code = read_to_string(manifest_dir.join("src/lib.rs")).expect("failed to read lib.rs");
 
     for f in get_manifest().features.keys() {
-      if !(f.starts_with("__") || f == "default" || lib_code.contains(&format!("*{}**", f))) {
-        panic!("Feature {} is not documented", f);
+      if !(f.starts_with("__") || f == "default" || lib_code.contains(&format!("*{f}**"))) {
+        panic!("Feature {f} is not documented");
       }
     }
   }
@@ -888,8 +909,7 @@ mod tests {
     for checked_feature in checked_features {
       if !manifest.features.iter().any(|(f, _)| f == checked_feature) {
         panic!(
-          "Feature {} was checked in the alias build step but it does not exist in core/tauri/Cargo.toml",
-          checked_feature
+          "Feature {checked_feature} was checked in the alias build step but it does not exist in core/tauri/Cargo.toml"
         );
       }
     }
@@ -925,24 +945,21 @@ mod tests {
       let module = module_all_feature.replace("-all", "");
       assert!(
         checked_features.contains(&module_all_feature.as_str()),
-        "`{}` is not aliased",
-        module
+        "`{module}` is not aliased"
       );
 
-      let module_prefix = format!("{}-", module);
+      let module_prefix = format!("{module}-");
       // we assume that module features are the ones that start with `<module>-`
       // though it's not 100% accurate, we have an allowed list to fix it
       let module_features = manifest
         .features
-        .iter()
-        .map(|(f, _)| f)
+        .keys()
         .filter(|f| f.starts_with(&module_prefix));
       for module_feature in module_features {
         assert!(
           allowed.contains(&module_feature.as_str())
             || checked_features.contains(&module_feature.as_str()),
-          "`{}` is not aliased",
-          module_feature
+          "`{module_feature}` is not aliased"
         );
       }
     }
@@ -970,7 +987,7 @@ mod test_utils {
     fn check_spawn_task(task in "[a-z]+") {
       // create dummy task function
       let dummy_task = async move {
-        format!("{}-run-dummy-task", task);
+        format!("{task}-run-dummy-task");
       };
       // call spawn
       crate::async_runtime::spawn(dummy_task);

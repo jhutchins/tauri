@@ -36,6 +36,8 @@ pub trait AppSettings {
     config: &Config,
     target: &str,
   ) -> crate::Result<Vec<tauri_bundler::BundleBinary>>;
+  fn app_name(&self) -> Option<String>;
+  fn lib_name(&self) -> Option<String>;
 
   fn get_bundler_settings(
     &self,

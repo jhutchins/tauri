@@ -19,10 +19,7 @@ fn get_env_var<R: FnOnce(String) -> String>(
       error.replace(
         syn::Error::new(
           function.span(),
-          format!(
-            "`{}` env var not set, do you have a build script with tauri-build?",
-            name,
-          ),
+          format!("`{name}` env var not set, do you have a build script with tauri-build?",),
         )
         .into_compile_error(),
       );
@@ -36,14 +33,13 @@ pub fn entry_point(_attributes: TokenStream, item: TokenStream) -> TokenStream {
   let function_name = function.sig.ident.clone();
 
   let mut error = None;
-  let domain = get_env_var("TAURI_ANDROID_DOMAIN", |r| r, &mut error, &function);
+  let domain = get_env_var("TAURI_ANDROID_PACKAGE_PREFIX", |r| r, &mut error, &function);
   let app_name = get_env_var(
     "CARGO_PKG_NAME",
-    |r| r.replace('_', "_1"),
+    |r| r.replace('-', "_"),
     &mut error,
     &function,
   );
-  let app_name_str = var("CARGO_PKG_NAME").unwrap();
 
   if let Some(e) = error {
     quote!(#e).into()
@@ -62,7 +58,8 @@ pub fn entry_point(_attributes: TokenStream, item: TokenStream) -> TokenStream {
       #function
 
       fn _start_app() {
-        ::tauri::init_logging(#app_name_str);
+        #[cfg(target_os = "ios")]
+        ::tauri::log_stdout();
         #[cfg(target_os = "android")]
         {
           use ::tauri::paste;

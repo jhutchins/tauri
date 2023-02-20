@@ -3,6 +3,7 @@ use super::{
   MobileTarget,
 };
 use crate::{
+  build::Options as BuildOptions,
   helpers::flock,
   interface::{AppSettings, Interface, Options as InterfaceOptions},
   mobile::{write_options, CliOptions},
@@ -10,7 +11,7 @@ use crate::{
 };
 use clap::{ArgAction, Parser};
 
-use cargo_mobile::{
+use tauri_mobile::{
   android::{aab, apk, config::Config as AndroidConfig, env::Env, target::Target},
   opts::{NoiseLevel, Profile},
   target::TargetTrait,
@@ -53,7 +54,7 @@ pub struct Options {
   pub open: bool,
 }
 
-impl From<Options> for crate::build::Options {
+impl From<Options> for BuildOptions {
   fn from(options: Options) -> Self {
     Self {
       runner: None,
@@ -111,7 +112,14 @@ fn run_build(
     options.aab = true;
   }
 
-  let mut build_options = options.clone().into();
+  let mut build_options: BuildOptions = options.clone().into();
+  build_options.target = Some(
+    Target::all()
+      .get(Target::DEFAULT_KEY)
+      .unwrap()
+      .triple
+      .into(),
+  );
   let interface = crate::build::setup(&mut build_options, true)?;
 
   let app_settings = interface.app_settings();
@@ -120,7 +128,7 @@ fn run_build(
     ..Default::default()
   })?;
   let out_dir = bin_path.parent().unwrap();
-  let _lock = flock::open_rw(&out_dir.join("lock").with_extension("android"), "Android")?;
+  let _lock = flock::open_rw(out_dir.join("lock").with_extension("android"), "Android")?;
 
   let cli_options = CliOptions {
     features: build_options.features.clone(),

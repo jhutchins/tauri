@@ -654,7 +654,7 @@ impl AppSettings for RustAppSettings {
     }
     .into();
 
-    Ok(out_dir.join(bin_name).with_extension(&binary_extension))
+    Ok(out_dir.join(bin_name).with_extension(binary_extension))
   }
 
   fn get_binaries(&self, config: &Config, target: &str) -> crate::Result<Vec<BundleBinary>> {
@@ -759,6 +759,30 @@ impl AppSettings for RustAppSettings {
     }
 
     Ok(binaries)
+  }
+
+  fn app_name(&self) -> Option<String> {
+    self
+      .manifest
+      .inner
+      .as_table()
+      .get("package")
+      .and_then(|p| p.as_table())
+      .and_then(|p| p.get("name"))
+      .and_then(|n| n.as_str())
+      .map(|n| n.to_string())
+  }
+
+  fn lib_name(&self) -> Option<String> {
+    self
+      .manifest
+      .inner
+      .as_table()
+      .get("lib")
+      .and_then(|p| p.as_table())
+      .and_then(|p| p.get("name"))
+      .and_then(|n| n.as_str())
+      .map(|n| n.to_string())
   }
 }
 
@@ -926,8 +950,8 @@ fn tauri_config_to_bundle_settings(
       }
     }
 
-    // provides `libwebkit2gtk-4.0.so.37` and all `4.0` versions have the -37 package name
-    depends.push("libwebkit2gtk-4.0-37".to_string());
+    // provides `libwebkit2gtk-4.1.so.37` and all `4.0` versions have the -37 package name
+    depends.push("libwebkit2gtk-4.1-0".to_string());
     depends.push("libgtk-3-0".to_string());
   }
 

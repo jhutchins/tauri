@@ -3,16 +3,15 @@
 // SPDX-License-Identifier: MIT
 
 use crate::{
-  helpers::{app_paths::tauri_dir, config::Config as TauriConfig},
-  interface::DevProcess,
+  helpers::{
+    app_paths::tauri_dir,
+    config::{
+      get as get_config, reload as reload_config, AppUrl, Config as TauriConfig, WindowUrl,
+    },
+  },
+  interface::{AppInterface, AppSettings, DevProcess, Interface, Options as InterfaceOptions},
 };
 use anyhow::{bail, Result};
-use cargo_mobile::{
-  bossy,
-  config::app::{App, Raw as RawAppConfig},
-  env::Error as EnvError,
-  opts::NoiseLevel,
-};
 use jsonrpsee::client_transport::ws::WsTransportClientBuilder;
 use jsonrpsee::core::client::{Client, ClientBuilder, ClientT};
 use jsonrpsee::rpc_params;
@@ -33,12 +32,18 @@ use std::{
     Arc,
   },
 };
+use tauri_mobile::{
+  bossy,
+  config::app::{App, Raw as RawAppConfig},
+  env::Error as EnvError,
+  opts::{NoiseLevel, Profile},
+};
 use tokio::runtime::Runtime;
 
 #[cfg(not(windows))]
-use cargo_mobile::env::Env;
+use tauri_mobile::env::Env;
 #[cfg(windows)]
-use cargo_mobile::os::Env;
+use tauri_mobile::os::Env;
 
 pub mod android;
 mod init;
@@ -127,8 +132,46 @@ pub struct CliOptions {
   pub vars: HashMap<String, OsString>,
 }
 
+fn setup_dev_config(config_extension: &mut Option<String>) -> crate::Result<()> {
+  let config = get_config(config_extension.as_deref())?;
+
+  let mut dev_path = config
+    .lock()
+    .unwrap()
+    .as_ref()
+    .unwrap()
+    .build
+    .dev_path
+    .clone();
+
+  if let AppUrl::Url(WindowUrl::External(url)) = &mut dev_path {
+    let localhost = match url.host() {
+      Some(url::Host::Domain(d)) => d == "localhost",
+      Some(url::Host::Ipv4(i)) => {
+        i == std::net::Ipv4Addr::LOCALHOST || i == std::net::Ipv4Addr::UNSPECIFIED
+      }
+      _ => false,
+    };
+    if localhost {
+      let ip = crate::dev::local_ip_address();
+      url.set_host(Some(&ip.to_string())).unwrap();
+      if let Some(c) = config_extension {
+        let mut c: tauri_utils::config::Config = serde_json::from_str(c)?;
+        c.build.dev_path = dev_path.clone();
+        config_extension.replace(serde_json::to_string(&c).unwrap());
+      } else {
+        config_extension.replace(format!(r#"{{ "build": {{ "devPath": "{url}" }} }}"#));
+      }
+      reload_config(config_extension.as_deref())?;
+    }
+  }
+
+  Ok(())
+}
+
 fn env_vars() -> HashMap<String, OsString> {
   let mut vars = HashMap::new();
+  vars.insert("RUST_LOG_STYLE".into(), "always".into());
   for (k, v) in std::env::vars_os() {
     let k = k.to_string_lossy();
     if (k.starts_with("TAURI") && k != "TAURI_PRIVATE_KEY" && k != "TAURI_KEY_PASSWORD")
@@ -220,28 +263,37 @@ fn get_app(config: &TauriConfig) -> App {
   }
   reverse_domain.pop();
 
-  let manifest_path = tauri_dir().join("Cargo.toml");
-  let app_name = if let Ok(manifest) = crate::interface::manifest::read_manifest(&manifest_path) {
-    manifest
-      .as_table()
-      .get("package")
-      .and_then(|p| p.as_table())
-      .and_then(|p| p.get("name"))
-      .and_then(|n| n.as_str())
-      .map(|n| n.to_string())
-      .unwrap_or(app_name)
-  } else {
-    app_name
-  };
+  let interface = AppInterface::new(
+    config,
+    // the target triple is not relevant
+    Some("".into()),
+  )
+  .expect("failed to load interface");
+
+  let app_name = interface.app_settings().app_name().unwrap_or(app_name);
+  let lib_name = interface.app_settings().lib_name();
 
   let raw = RawAppConfig {
     name: app_name,
+    lib_name,
     stylized_name: config.package.product_name.clone(),
     domain,
     asset_dir: None,
     template_pack: None,
   };
-  App::from_raw(tauri_dir(), raw).unwrap()
+  App::from_raw(tauri_dir(), raw)
+    .unwrap()
+    .with_target_dir_resolver(move |target, profile| {
+      let bin_path = interface
+        .app_settings()
+        .app_binary_path(&InterfaceOptions {
+          debug: matches!(profile, Profile::Debug),
+          target: Some(target.into()),
+          ..Default::default()
+        })
+        .expect("failed to resolve target directory");
+      bin_path.parent().unwrap().to_path_buf()
+    })
 }
 
 fn ensure_init(project_dir: PathBuf, target: Target) -> Result<()> {

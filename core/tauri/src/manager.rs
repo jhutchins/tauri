@@ -73,6 +73,12 @@ const WINDOW_FILE_DROP_HOVER_EVENT: &str = "tauri://file-drop-hover";
 const WINDOW_FILE_DROP_CANCELLED_EVENT: &str = "tauri://file-drop-cancelled";
 const MENU_EVENT: &str = "tauri://menu";
 
+// we need to proxy the dev server on mobile because we can't use `localhost`, so we use the local IP address
+// and we do not get a secure context without the custom protocol that proxies to the dev server
+// additionally, we need the custom protocol to inject the initialization scripts on Android
+// must also keep in sync with the `let mut response` assignment in prepare_uri_scheme_protocol
+const PROXY_DEV_SERVER: bool = cfg!(all(dev, mobile));
+
 #[derive(Default)]
 /// Spaced and quoted Content-Security-Policy hash values.
 struct CspHashStrings {
@@ -179,7 +185,7 @@ fn replace_csp_nonce(
   if !(nonces.is_empty() && hashes.is_empty()) {
     let nonce_sources = nonces
       .into_iter()
-      .map(|n| format!("'nonce-{}'", n))
+      .map(|n| format!("'nonce-{n}'"))
       .collect::<Vec<String>>();
     let sources = csp.entry(directive.into()).or_insert_with(Default::default);
     let self_source = "'self'".to_string();
@@ -373,7 +379,7 @@ impl<R: Runtime> WindowManager<R> {
   fn get_browser_origin(&self) -> String {
     match self.base_path() {
       AppUrl::Url(WindowUrl::External(url)) => {
-        if cfg!(dev) && !cfg!(target_os = "linux") {
+        if PROXY_DEV_SERVER {
           format_real_schema("tauri")
         } else {
           url.origin().ascii_serialization()
@@ -449,8 +455,7 @@ impl<R: Runtime> WindowManager<R> {
         window_labels_array = serde_json::to_string(&window_labels)?,
         current_window_label = serde_json::to_string(&label)?,
       ))
-      .initialization_script(&self.initialization_script(&ipc_init.into_string(),&pattern_init.into_string(),&plugin_init, is_init_global)?)
-      ;
+      .initialization_script(&self.initialization_script(&ipc_init.into_string(),&pattern_init.into_string(),&plugin_init, is_init_global)?);
 
     #[cfg(feature = "isolation")]
     if let Pattern::Isolation { schema, .. } = self.pattern() {
@@ -488,7 +493,7 @@ impl<R: Runtime> WindowManager<R> {
           window_url.scheme(),
           window_url.host().unwrap(),
           if let Some(port) = window_url.port() {
-            format!(":{}", port)
+            format!(":{port}")
           } else {
             "".into()
           }
@@ -714,8 +719,8 @@ impl<R: Runtime> WindowManager<R> {
     } = &self.inner.pattern
     {
       let assets = assets.clone();
-      let schema_ = schema.clone();
-      let url_base = format!("{}://localhost", schema_);
+      let _schema_ = schema.clone();
+      let url_base = format!("{schema}://localhost");
       let aes_gcm_key = *crypto_keys.aes_gcm().raw();
 
       pending.register_uri_scheme_protocol(schema, move |request| {
@@ -814,7 +819,7 @@ impl<R: Runtime> WindowManager<R> {
     let asset_response = assets
       .get(&path.as_str().into())
       .or_else(|| {
-        eprintln!("Asset `{}` not found; fallback to {}.html", path, path);
+        eprintln!("Asset `{path}` not found; fallback to {path}.html");
         let fallback = format!("{}.html", path.as_str()).into();
         let asset = assets.get(&fallback);
         asset_path = fallback;
@@ -885,19 +890,39 @@ impl<R: Runtime> WindowManager<R> {
     >,
   ) -> Box<dyn Fn(&HttpRequest) -> Result<HttpResponse, Box<dyn std::error::Error>> + Send + Sync>
   {
-    #[cfg(dev)]
-    let url = self.get_url().into_owned();
-    #[cfg(not(dev))]
+    #[cfg(all(dev, mobile))]
+    let url = {
+      let mut url = self.get_url().as_str().to_string();
+      if url.ends_with('/') {
+        url.pop();
+      }
+      url
+    };
+    #[cfg(not(all(dev, mobile)))]
     let manager = self.clone();
     let window_origin = window_origin.to_string();
 
+    #[cfg(all(dev, mobile))]
+    #[derive(Clone)]
+    struct CachedResponse {
+      status: http::StatusCode,
+      headers: http::HeaderMap,
+      body: Cow<'static, [u8]>,
+    }
+
+    #[cfg(all(dev, mobile))]
+    let response_cache = Arc::new(Mutex::new(HashMap::new()));
+
     Box::new(move |request| {
-      let path = request
-        .uri()
-        .split(&['?', '#'][..])
+      // use the entire URI as we are going to proxy the request
+      let path = if PROXY_DEV_SERVER {
+        request.uri()
+      } else {
         // ignore query string and fragment
-        .next()
-        .unwrap()
+        request.uri().split(&['?', '#'][..]).next().unwrap()
+      };
+
+      let path = path
         .strip_prefix("tauri://localhost")
         .map(|p| p.to_string())
         // the `strip_prefix` only returns None when a request is made to `https://tauri.$P` on Windows
@@ -907,25 +932,43 @@ impl<R: Runtime> WindowManager<R> {
       let mut builder =
         HttpResponseBuilder::new().header("Access-Control-Allow-Origin", &window_origin);
 
-      #[cfg(dev)]
+      #[cfg(all(dev, mobile))]
       let mut response = {
         use attohttpc::StatusCode;
-        let mut url = url.clone();
-        url.set_path(&path);
-        let mut proxy_builder = attohttpc::get(url.as_str()).danger_accept_invalid_certs(true);
+        let decoded_path = percent_encoding::percent_decode(path.as_bytes())
+          .decode_utf8_lossy()
+          .to_string();
+        let url = format!("{url}{decoded_path}");
+        let mut proxy_builder = attohttpc::get(&url).danger_accept_invalid_certs(true);
         for (name, value) in request.headers() {
           proxy_builder = proxy_builder.header(name, value);
         }
         match proxy_builder.send() {
           Ok(r) => {
-            for (name, value) in r.headers() {
+            let mut response_cache_ = response_cache.lock().unwrap();
+            let mut response = None;
+            if r.status() == StatusCode::NOT_MODIFIED {
+              response = response_cache_.get(&url);
+            }
+            let response = if let Some(r) = response {
+              r
+            } else {
+              let (status, headers, reader) = r.split();
+              let body = reader.bytes()?;
+              let response = CachedResponse {
+                status,
+                headers,
+                body: body.into(),
+              };
+              response_cache_.insert(url.clone(), response);
+              response_cache_.get(&url).unwrap()
+            };
+            for (name, value) in &response.headers {
               builder = builder.header(name, value);
             }
-            let mut status = r.status();
-            if status == StatusCode::NOT_MODIFIED {
-              status = StatusCode::OK;
-            }
-            builder.status(status).body(r.bytes()?)?
+            builder
+              .status(response.status)
+              .body(response.body.clone())?
           }
           Err(e) => {
             debug_eprintln!("Failed to request {}: {}", url.as_str(), e);
@@ -934,7 +977,7 @@ impl<R: Runtime> WindowManager<R> {
         }
       };
 
-      #[cfg(not(dev))]
+      #[cfg(not(all(dev, mobile)))]
       let mut response = {
         let asset = manager.get_asset(path)?;
         builder = builder.mimetype(&asset.mime_type);
@@ -952,7 +995,7 @@ impl<R: Runtime> WindowManager<R> {
         let response_csp = String::from_utf8_lossy(response_csp.as_bytes());
         let html = String::from_utf8_lossy(response.body());
         let body = html.replacen(tauri_utils::html::CSP_TOKEN, &response_csp, 1);
-        *response.body_mut() = body.as_bytes().to_vec();
+        *response.body_mut() = body.as_bytes().to_vec().into();
       }
       Ok(response)
     })
@@ -1171,10 +1214,11 @@ impl<R: Runtime> WindowManager<R> {
     #[allow(unused_mut)] // mut url only for the data-url parsing
     let (is_local, mut url) = match &pending.webview_attributes.url {
       WindowUrl::App(path) => {
-        #[cfg(target_os = "linux")]
-        let url = self.get_url();
-        #[cfg(not(target_os = "linux"))]
-        let url: Cow<'_, Url> = Cow::Owned(Url::parse("tauri://localhost").unwrap());
+        let url = if PROXY_DEV_SERVER {
+          Cow::Owned(Url::parse("tauri://localhost").unwrap())
+        } else {
+          self.get_url()
+        };
         (
           true,
           // ignore "index.html" just to simplify the url
@@ -1193,7 +1237,7 @@ impl<R: Runtime> WindowManager<R> {
         let config_url = self.get_url();
         let is_local = config_url.make_relative(url).is_some();
         let mut url = url.clone();
-        if is_local && !cfg!(target_os = "linux") {
+        if is_local && PROXY_DEV_SERVER {
           url.set_scheme("tauri").unwrap();
           url.set_host(Some("localhost")).unwrap();
         }
@@ -1463,8 +1507,7 @@ fn on_window_event<R: Runtime>(
       let windows = windows_map.values();
       for window in windows {
         window.eval(&format!(
-          r#"window.__TAURI_METADATA__.__windows = window.__TAURI_METADATA__.__windows.filter(w => w.label !== "{}");"#,
-          label
+          r#"(function () {{ const metadata = window.__TAURI_METADATA__; if (metadata != null) {{ metadata.__windows = window.__TAURI_METADATA__.__windows.filter(w => w.label !== "{label}"); }} }})()"#,
         ))?;
       }
     }
